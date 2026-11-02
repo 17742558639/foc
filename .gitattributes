@@ -1,0 +1,27 @@
+# ============================================================
+#  让 GitHub 的语言统计只反映"我们写的代码"
+#  Drivers / Middlewares / USB_DEVICE 都是 ST 官方生成或厂商库，
+#  标记成 vendored 后不会计入语言占比。
+# ============================================================
+F407Focd/focF407project1/Drivers/**      linguist-vendored
+F407Focd/focF407project1/Middlewares/**  linguist-vendored
+F407Focd/focF407project1/USB_DEVICE/**   linguist-vendored
+F407Focd/focF407project1/Module/**       linguist-vendored
+*.s                                       linguist-vendored
+
+# 文档不计入语言统计
+*.md                                      linguist-documentation
+*.docx                                    linguist-documentation
+*.pdf                                     linguist-documentation
+docs/**                                   linguist-documentation
+
+# 明确把核心算法标记为 C（避免被当成别的语言）
+F407Focd/focF407project1/Core/Src/foc.c      linguist-language=C
+F407Focd/focF407project1/Core/Src/encoder.c  linguist-language=C
+F407Focd/focF407project1/Core/Src/main.c     linguist-language=C
+F407Focd/focF407project1/vofa/*              linguist-language=C
+
+# 换行符统一，避免 Windows/Linux 混杂
+*.c    text eol=crlf
+*.h    text eol=crlf
+*.md   text eol=lf
