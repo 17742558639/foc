@@ -17,8 +17,8 @@
 #define FOC_UQ_LIMIT        1.30f       /* 实际用的电压限幅，伏 */
 
 /* ==================== 开环 V/f ==================== */
-#define FOC_VF_SLOPE        0.0030f     /* 斜率，伏/(弧度/秒) */
-#define FOC_VOLT_OFFSET     0.50f       /* 低速补偿电压，伏 */
+#define FOC_VF_SLOPE        0.0008f     /* 斜率，伏/(弧度/秒) */
+#define FOC_VOLT_OFFSET     0.050f       /* 低速补偿电压，伏 */
 
 /* ==================== 预定位标定 ==================== */
 #define FOC_ALIGN_VOLTAGE   0.50f       /* 预定位电压，伏 */
@@ -39,11 +39,22 @@
 #define FOC_POS_I_DEADZONE  0.010f
 
 /* ==================== 速度环 PI ==================== */
-#define FOC_SPEED_KP        0.05f       /* 比例，伏/(弧度/秒) */
-#define FOC_SPEED_KI        4.0f        /* 积分，伏/(弧度/秒·秒) */
+#define FOC_SPEED_KP        0.15f       /* 比例，伏/(弧度/秒) */
+#define FOC_SPEED_KI        0.0f        /* 积分，伏/(弧度/秒·秒) */
+
+/* 速度环积分项自己的限幅（伏）。前馈已经给了大部分工作电压，
+   积分只负责修补偏差，所以限得比 FOC_UQ_LIMIT 小得多。 */
+#define FOC_SPEED_I_LIMIT   0.60f
+
+/* 加速度前馈系数，单位 伏/(弧度/秒²)。
+ * 作用：速度给定在变化时，按"加速度"提前给一份电压，让跟踪更准。
+ * 物理值 = R*J/Kt，J 约 2e-5 kg·m² 时约 0.001，量级很小。
+ * 给 0 = 关闭。 */
+
+#define FOC_SPEED_ACC_FFF   0.000f
 
 /* ==================== 起动冲击（破静摩擦） ==================== */
-#define FOC_START_BOOST     0.60f       /* 冲击电压，伏 */
+#define FOC_START_BOOST     0.0f       /* 冲击电压，伏 */
 #define FOC_STALL_TICKS     4000        /* 判卡住：4000 拍 = 0.2 秒 */
 #define FOC_BOOST_TICKS     8000        /* 冲击节奏：8000 拍 = 0.4 秒 */
 

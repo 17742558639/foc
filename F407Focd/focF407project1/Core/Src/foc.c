@@ -277,10 +277,22 @@ void foc_close_speed(float target_speed)
 
     feed_forward = direction * (FOC_VF_SLOPE * speed_e + FOC_VOLT_OFFSET);
 
+    /* 积分项单独限幅：和位置环同一个道理，
+       积分涨到满力就变成开关控制 → 震荡。
+       前馈已经给了大部分工作电压，积分只需要修补偏差。 */
     g_integral_speed += FOC_SPEED_KI * error_speed * FOC_TS;
 
-    if (g_integral_speed >  FOC_UQ_LIMIT) { g_integral_speed =  FOC_UQ_LIMIT; }
-    if (g_integral_speed < -FOC_UQ_LIMIT) { g_integral_speed = -FOC_UQ_LIMIT; }
+    if (g_integral_speed >  FOC_SPEED_I_LIMIT) { g_integral_speed =  FOC_SPEED_I_LIMIT; }
+    if (g_integral_speed < -FOC_SPEED_I_LIMIT) { g_integral_speed = -FOC_SPEED_I_LIMIT; }
+
+    /* 加速度前馈：用"给定速度的变化率"提前出力。
+       给 0 时这段等于没有，不影响原有行为。 */
+    {
+        static float s_last_target_speed = 0.0f;
+        float accel = (target_speed - s_last_target_speed) / FOC_TS;
+        s_last_target_speed = target_speed;
+        feed_forward += FOC_SPEED_ACC_FFF * accel;
+    }
 
     voltage_q = feed_forward
        + FOC_SPEED_KP * error_speed

@@ -48,11 +48,11 @@
 /* USE_SPEED_LOOP=1     → 速度闭环，按 TARGET_SPEED 转
    USE_POSITION_LOOP=1  → 位置闭环，转到 TARGET_ANGLE 停住
    两个都 0              → 开环 V/f */
-#define USE_SPEED_LOOP       0
-#define USE_POSITION_LOOP    1
+#define USE_SPEED_LOOP       1
+#define USE_POSITION_LOOP    0
 
 /* ==================== 目标值 ==================== */
-#define TARGET_SPEED          1.0f       /* 目标转速，rad/s（负数反转） */
+#define TARGET_SPEED          10.0f                      /* 目标转速，rad/s（负数反转） */
 #define TARGET_ANGLE          5.70f     /* 目标机械角，rad（0 ~ 6.283） */
 
 /* ==================== 转速斜坡 ==================== */
