@@ -28,7 +28,7 @@ extern SPI_HandleTypeDef hspi1;
 volatile encoder_debug_t g_encoder_dbg;
 
 /* 上一次读到的机械角，用来算速度 */
-static float s_last_mech_rad = 0.0f;
+static float s_last_angle_mech = 0.0f;
 
 /* 窗口内累计的角度增量（弧度，已处理过零） */
 static float s_delta_accum = 0.0f;
@@ -96,34 +96,34 @@ float encoder_read_mech(void)
 {
     uint16_t raw_value;
     uint16_t angle_count;
-    float    mech_rad;
+    float    angle_mech;
 
     raw_value   = encoder_read_raw();
     angle_count = (uint16_t)(raw_value >> ENC_ANGLE_SHIFT);
 
     /* 计数 → 弧度 */
-    mech_rad = (float)angle_count * ENC_TWO_PI / ENC_COUNTS_PER_REV;
+    angle_mech = (float)angle_count * ENC_TWO_PI / ENC_COUNTS_PER_REV;
 
     /* 方向：编码器装配方向反了就把读数镜像过来 */
-    mech_rad = wrap_two_pi(mech_rad * ENC_DIR);
+    angle_mech = wrap_two_pi(angle_mech * ENC_DIR);
 
     /* 减掉零位偏移 */
-    mech_rad = wrap_two_pi(mech_rad - g_encoder_dbg.zero_offset);
+    angle_mech = wrap_two_pi(angle_mech - g_encoder_dbg.zero_offset);
 
     g_encoder_dbg.raw = raw_value;
 
-    return mech_rad;
+    return angle_mech;
 }
 
 float encoder_read_elec(void)
 {
-    float mech_rad = encoder_read_mech();
-    float elec_rad = mech_rad * (float)ENC_POLE_PAIRS;
+    float angle_mech = encoder_read_mech();
+    float angle = angle_mech * (float)ENC_POLE_PAIRS;
 
-    g_encoder_dbg.mech_rad = mech_rad;
-    g_encoder_dbg.elec_rad = wrap_two_pi(elec_rad);
+    g_encoder_dbg.angle_mech = angle_mech;
+    g_encoder_dbg.angle = wrap_two_pi(angle);
 
-    return g_encoder_dbg.elec_rad;
+    return g_encoder_dbg.angle;
 }
 
 /* ============================================================
@@ -132,27 +132,27 @@ float encoder_read_elec(void)
 
 void encoder_update(void)
 {
-    float mech_rad;
-    float delta_rad;
+    float angle_mech;
+    float delta_angle;
 
-    mech_rad = encoder_read_mech();
+    angle_mech = encoder_read_mech();
 
     /* 第一拍只记录，不算速度（否则第一拍会出现一个巨大的假速度） */
     if (s_first_run) {
-        s_last_mech_rad = mech_rad;
+        s_last_angle_mech = angle_mech;
         s_first_run     = 0;
-        g_encoder_dbg.mech_rad      = mech_rad;
-        g_encoder_dbg.elec_rad      = wrap_two_pi(mech_rad * (float)ENC_POLE_PAIRS);
-        g_encoder_dbg.speed_radps   = 0.0f;
+        g_encoder_dbg.angle_mech      = angle_mech;
+        g_encoder_dbg.angle      = wrap_two_pi(angle_mech * (float)ENC_POLE_PAIRS);
+        g_encoder_dbg.speed   = 0.0f;
         return;
     }
 
     /* 本拍相对上一拍转过的角度（处理过零） */
-    delta_rad = wrap_delta(mech_rad - s_last_mech_rad);
-    s_last_mech_rad = mech_rad;
+    delta_angle = wrap_delta(angle_mech - s_last_angle_mech);
+    s_last_angle_mech = angle_mech;
 
     /* 累积到窗口里 */
-    s_delta_accum += delta_rad;
+    s_delta_accum += delta_angle;
     s_sample_count++;
 
     /* 窗口满了，算一次速度 */
@@ -161,20 +161,20 @@ void encoder_update(void)
         float instant_speed  = s_delta_accum / window_seconds;
 
         /* 一阶低通，压掉量化噪声 */
-        g_encoder_dbg.speed_radps = g_encoder_dbg.speed_radps * (1.0f - ENC_SPEED_LPF)
+        g_encoder_dbg.speed = g_encoder_dbg.speed * (1.0f - ENC_SPEED_LPF)
                                   + instant_speed * ENC_SPEED_LPF;
 
         s_delta_accum  = 0.0f;
         s_sample_count = 0;
     }
 
-    g_encoder_dbg.mech_rad = mech_rad;
-    g_encoder_dbg.elec_rad = wrap_two_pi(mech_rad * (float)ENC_POLE_PAIRS);
+    g_encoder_dbg.angle_mech = angle_mech;
+    g_encoder_dbg.angle = wrap_two_pi(angle_mech * (float)ENC_POLE_PAIRS);
 }
 
 float encoder_read_speed(void)
 {
-    return g_encoder_dbg.speed_radps;
+    return g_encoder_dbg.speed;
 }
 
 /* ============================================================
@@ -187,13 +187,13 @@ void encoder_init(void)
     HAL_GPIO_WritePin(ENC_CS_PORT, ENC_CS_PIN, GPIO_PIN_SET);
 
     g_encoder_dbg.raw         = 0;
-    g_encoder_dbg.mech_rad    = 0.0f;
-    g_encoder_dbg.elec_rad    = 0.0f;
-    g_encoder_dbg.speed_radps = 0.0f;
+    g_encoder_dbg.angle_mech    = 0.0f;
+    g_encoder_dbg.angle    = 0.0f;
+    g_encoder_dbg.speed = 0.0f;
     g_encoder_dbg.zero_offset = 0.0f;
     g_encoder_dbg.error_count = 0;
 
-    s_last_mech_rad = 0.0f;
+    s_last_angle_mech = 0.0f;
     s_delta_accum   = 0.0f;
     s_sample_count  = 0;
     s_first_run     = 1;

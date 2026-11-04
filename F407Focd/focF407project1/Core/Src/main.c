@@ -35,63 +35,46 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-/* ---------- 低速测试参数：想换转速只改这三行 ---------- */
-/* 目标机械角速度，单位 rad/s。1 rad/s ≈ 9.55 rpm，低速就从 1~2 开始 */
-#define W_TARGET_RADPS   (-5.0f)
-/* 每一步加多少 rad/s。开环不能一下跳速，必须慢慢爬，否则失步 */
-#define W_RAMP_STEP      5.0f
-/* 每多少毫秒走一步 */
-#define W_RAMP_INTERVAL  500U
 
-/* ---------- VOFA+ 示波器 ---------- */
-/* 每多少毫秒发一帧。5ms = 200Hz，USB 虚拟串口轻松跟得上；
-   想看更快的变化就改小，最小 1（1000Hz）也够用 */
-#define VOFA_PERIOD_MS   5U
-/* 数据引擎二选一：
-   1 = FireWater 文本协议（"1.234,5.678\n"，串口助手直接能看明文）
-   0 = JustFloat 二进制协议（省带宽，但人看不懂）
-   调通阶段用 1，正式跑长时间波形再用 0 */
-#define VOFA_USE_TEXT    0
+/* ==================== 运行模式 ==================== */
+/* 0 = 正常运行（开环 / 位置环 / 速度环，由下面两个开关决定）
+   1 = 只读编码器（不启动 PWM，电机自由，手转看角度）
+   2 = 静态标定（固定电压矢量吸住转子，ch4 给出建议 offset）
+   3 = 升压扫描（0.1V 起每 0.5s 加 0.05V，找启动电压后自动冻结）
+   4 = offset 扫描（微调量转一圈，看电机何时开始朝目标走） */
+#define ENC_TEST_MODE        0
 
-/* ---------- 编码器调试模式 ----------
-   0 = 正常运行（开环 V/f / 位置环）
-   1 = 只读编码器：不启动 PWM、不开中断，电机完全自由，手转看角度
-   2 = 电角度 offset 标定：固定电压矢量把转子吸住，读建议 offset
-   3 = 【升压扫描】电压从 0.1V 每 0.5 秒加 0.05V，慢慢升到 1.5V，
-       看电机在哪个电压上"啪"一下被吸动。全程不需要万用表。
-   4 = 【offset 扫描】电角度偏移在 0~2π 之间自动转一圈（约 21 秒），
-       位置环一直使能。电机什么时候开始往目标方向走，
-       那一刻 ch0 显示的微调值就是正确的 offset。 */
-#define ENC_TEST_MODE    0
-
-/* offset 扫描速度：每 100ms 转多少弧度（0.04 → 一圈约 16 秒） */
-#define CAL_OFFSET_STEP     0.04f
-#define CAL_OFFSET_INTERVAL 100U
-
-/* 升压扫描的步长和上限 */
-#define CAL_UQ_START     0.10f
-#define CAL_UQ_STEP      0.05f
-#define CAL_UQ_MAX       1.50f
-#define CAL_UQ_INTERVAL  500U
-/* 转子一旦累计转过这么多弧度，就认为"吸动了"，立刻停止升压 */
-#define CAL_MOVE_THRESH  0.05f
-
-/* ---------- 控制方式（三选一） ----------
-   USE_SPEED_LOOP    = 1 → 速度闭环 L2（按 w_cmd 的转速转，带反馈）
-   USE_POSITION_LOOP = 1 → 位置闭环 L1（转到 pos_target_mech 并停住）
+/* ==================== 控制方式（三选一） ==================== */
+/* USE_SPEED_LOOP=1     → 速度闭环，按 TARGET_SPEED 转
+   USE_POSITION_LOOP=1  → 位置闭环，转到 TARGET_ANGLE 停住
    两个都 0              → 开环 V/f */
-#define USE_SPEED_LOOP      1
-#define USE_POSITION_LOOP   0
+#define USE_SPEED_LOOP       0
+#define USE_POSITION_LOOP    1
 
-/* 位置环的目标机械角，单位弧度（0 ~ 6.283，一圈）。
- * 当前测试：从 6.24 改到 5.80（往另一侧走 0.27 rad），
- * 如果它能走过去，说明位置环两个方向都能工作，
- * 之前停在 6.07 就是被机械挡住了 */
-#define POS_TARGET_RAD      5.90f
+/* ==================== 目标值 ==================== */
+#define TARGET_SPEED          1.0f       /* 目标转速，rad/s（负数反转） */
+#define TARGET_ANGLE          5.70f     /* 目标机械角，rad（0 ~ 6.283） */
 
-/* 位置环验证：1 = 每 2.5 秒自动换目标（看跟随），0 = 固定保持一个点
- * 做"推开能不能回来"的测试时，改成 0，目标固定，才好观察 */
-#define POS_SWEEP           0
+/* ==================== 转速斜坡 ==================== */
+#define SPEED_RAMP_STEP       0.5f      /* 每步加多少，rad/s */
+#define SPEED_RAMP_INTERVAL   500U      /* 每步多少毫秒 */
+
+/* ==================== VOFA+ 波形 ==================== */
+#define VOFA_PERIOD_MS        5U        /* 发送周期，ms（5ms = 200Hz） */
+#define VOFA_USE_TEXT         0         /* 1 = FireWater 文本，0 = JustFloat 二进制 */
+
+/* ==================== 标定参数 ==================== */
+#define OFFSET_STEP           0.04f     /* offset 扫描步长，rad/100ms */
+#define OFFSET_INTERVAL       100U      /* 每步多少毫秒 */
+#define CAL_VOLTAGE_START     0.10f     /* 升压扫描起始电压，V */
+#define CAL_VOLTAGE_STEP      0.05f     /* 每步加多少，V */
+#define CAL_VOLTAGE_MAX       1.50f     /* 最高升到多少，V */
+#define CAL_VOLTAGE_INTERVAL  500U      /* 每步多少毫秒 */
+#define MOVE_THRESHOLD        0.05f     /* 转过这么多就认为"吸动了"，rad */
+
+/* 位置环验证：1 = 每 2.5 秒自动换目标，0 = 固定保持一点 */
+#define POSITION_SWEEP        0
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -105,18 +88,11 @@ SPI_HandleTypeDef hspi1;
 TIM_HandleTypeDef htim1;
 
 /* USER CODE BEGIN PV */
-/* FOC 开环目标机械角速度 (rad/s)，主循环写、中断读，必须 volatile */
-volatile float w_cmd = 0.0f;
-
-/* 位置环目标机械角度 (rad)，主循环写、中断读 */
-volatile float pos_target_mech = POS_TARGET_RAD;
-
-/* 升压扫描用的当前电压（伏），主循环写、中断读 */
-volatile float cal_uq = CAL_UQ_START;
-
-/* offset 扫描用的当前微调量（弧度） */
-volatile float cal_offset_trim = 0.0f;
-
+/* 主循环写、中断读，必须 volatile */
+volatile float g_target_speed = 0.0f;               /* 目标转速，rad/s */
+volatile float g_target_angle = TARGET_ANGLE;       /* 目标机械角，rad */
+volatile float g_cal_voltage  = CAL_VOLTAGE_START;  /* 升压扫描当前电压，V */
+volatile float g_cal_offset   = 0.0f;               /* offset 扫描微调量，rad */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -192,7 +168,7 @@ int main(void)
   foc_align();        /* 转子预定位：固定电压矢量把转子吸住 */
   HAL_Delay(500);     /* 等转子停稳，此时中断还没开，CCR 保持不变 */
 #else
-  /* 模式 1 / 2：也要初始化 FOC 内部变量（theta=0、uq=0），但不做长时间预定位 */
+  /* 模式 1 / 2：也要初始化 FOC 内部变量（angle=0、voltage_q=0），但不做长时间预定位 */
   foc_init();
 #if ENC_TEST_MODE == 2
   /* 标定模式需要转子被固定矢量吸住，所以这里同样要预定位 */
@@ -218,23 +194,23 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    /* 慢斜坡：0 → W_TARGET_RADPS，每 0.5 秒加 0.5 rad/s。
-       给到 w_cmd 后，TIM1 中断里 foc_step_openloop(w_cmd) 每 50us 读一次。
-       只在正常运行模式下爬坡；标定模式必须让 w_cmd 保持 0，矢量才不动 */
+    /* 慢斜坡：0 → TARGET_SPEED，每 0.5 秒加 0.5 rad/s。
+       给到 g_target_speed 后，TIM1 中断里 foc_open(g_target_speed) 每 50us 读一次。
+       只在正常运行模式下爬坡；标定模式必须让 g_target_speed 保持 0，矢量才不动 */
 #if ENC_TEST_MODE == 0
-    static uint32_t t_last = 0;
-    if (HAL_GetTick() - t_last >= W_RAMP_INTERVAL)
+    static uint32_t tick_ramp = 0;
+    if (HAL_GetTick() - tick_ramp >= SPEED_RAMP_INTERVAL)
     {
-      t_last = HAL_GetTick();
-      if (W_TARGET_RADPS >= 0.0f)          /* 正转：往正方向爬 */
+      tick_ramp = HAL_GetTick();
+      if (TARGET_SPEED >= 0.0f)          /* 正转：往正方向爬 */
       {
-        if (w_cmd < W_TARGET_RADPS) { w_cmd += W_RAMP_STEP; }
-        if (w_cmd > W_TARGET_RADPS) { w_cmd = W_TARGET_RADPS; }
+        if (g_target_speed < TARGET_SPEED) { g_target_speed += SPEED_RAMP_STEP; }
+        if (g_target_speed > TARGET_SPEED) { g_target_speed = TARGET_SPEED; }
       }
       else                                  /* 反转：往负方向爬 */
       {
-        if (w_cmd > W_TARGET_RADPS) { w_cmd -= W_RAMP_STEP; }
-        if (w_cmd < W_TARGET_RADPS) { w_cmd = W_TARGET_RADPS; }
+        if (g_target_speed > TARGET_SPEED) { g_target_speed -= SPEED_RAMP_STEP; }
+        if (g_target_speed < TARGET_SPEED) { g_target_speed = TARGET_SPEED; }
       }
     }
 #endif
@@ -245,26 +221,26 @@ int main(void)
        ★ 安全设计：一旦检测到转子真的动了，立刻冻结电压，不再往上升，
          避免"电阻其实很小 → 升压过头 → 过流烧芯片"。 */
     {
-      static uint32_t t_cal          = 0;
-      static float    s_mech_start   = 0.0f;
-      static uint8_t  s_first_sample = 1;
+      static uint32_t tick_cal          = 0;
+      static float    s_angle_start   = 0.0f;
+      static uint8_t  s_first = 1;
       static uint8_t  s_moved        = 0;
-      float    mech_now = encoder_read_mech();
+      float    angle_now = encoder_read_mech();
 
-      if (s_first_sample)
+      if (s_first)
       {
-        s_mech_start   = mech_now;
-        s_first_sample = 0;
+        s_angle_start   = angle_now;
+        s_first = 0;
       }
       else
       {
         /* 判断"相对起点转过了多少"，而不是逐次累加绝对值——
            逐次累加会被编码器 ±1 计数的噪声喂出一个假的"大幅移动" */
-        float delta = mech_now - s_mech_start;
+        float delta = angle_now - s_angle_start;
         if (delta >  ENC_PI) { delta -= ENC_TWO_PI; }
         if (delta < -ENC_PI) { delta += ENC_TWO_PI; }
 
-        if (delta > CAL_MOVE_THRESH || delta < -CAL_MOVE_THRESH)
+        if (delta > MOVE_THRESHOLD || delta < -MOVE_THRESHOLD)
         {
           s_moved = 1;
         }
@@ -273,13 +249,13 @@ int main(void)
       /* 只有"还没动"的时候才继续升压 */
       if (!s_moved)
       {
-        if (HAL_GetTick() - t_cal >= CAL_UQ_INTERVAL)
+        if (HAL_GetTick() - tick_cal >= CAL_VOLTAGE_INTERVAL)
         {
-          t_cal = HAL_GetTick();
-          if (cal_uq < CAL_UQ_MAX)
+          tick_cal = HAL_GetTick();
+          if (g_cal_voltage < CAL_VOLTAGE_MAX)
           {
-            cal_uq += CAL_UQ_STEP;
-            if (cal_uq > CAL_UQ_MAX) { cal_uq = CAL_UQ_MAX; }
+            g_cal_voltage += CAL_VOLTAGE_STEP;
+            if (g_cal_voltage > CAL_VOLTAGE_MAX) { g_cal_voltage = CAL_VOLTAGE_MAX; }
           }
         }
       }
@@ -291,13 +267,13 @@ int main(void)
        大约 21 秒转完一圈。位置环一直在跑，
        扫到"正确"的那个角度时，电机会明显开始往目标走。 */
     {
-      static uint32_t t_off = 0;
-      if (HAL_GetTick() - t_off >= CAL_OFFSET_INTERVAL)
+      static uint32_t tick_offset = 0;
+      if (HAL_GetTick() - tick_offset >= OFFSET_INTERVAL)
       {
-        t_off = HAL_GetTick();
-        cal_offset_trim += CAL_OFFSET_STEP;
-        if (cal_offset_trim >= ENC_TWO_PI) { cal_offset_trim -= ENC_TWO_PI; }
-        foc_set_elec_offset_trim(cal_offset_trim);
+        tick_offset = HAL_GetTick();
+        g_cal_offset += OFFSET_STEP;
+        if (g_cal_offset >= ENC_TWO_PI) { g_cal_offset -= ENC_TWO_PI; }
+        foc_set_offset_trim(g_cal_offset);
       }
     }
 #endif
@@ -305,18 +281,18 @@ int main(void)
 #if (ENC_TEST_MODE == 0) && USE_POSITION_LOOP
     /* 位置环验证：每 2.5 秒换一个目标角，看电机能不能准确跟过去。
        步长只有 0.6 弧度（34°），小步、安全、看得清。
-       想固定目标就把上面的 POS_SWEEP 改成 0 */
-#if POS_SWEEP
+       想固定目标就把上面的 POSITION_SWEEP 改成 0 */
+#if POSITION_SWEEP
     {
       static const float  s_targets[] = { 5.80f, 5.20f, 4.60f, 5.20f };
       static uint8_t      s_index     = 0;
-      static uint32_t     t_step      = 0;
+      static uint32_t     tick_step      = 0;
 
-      if (HAL_GetTick() - t_step >= 2500U)
+      if (HAL_GetTick() - tick_step >= 2500U)
       {
-        t_step      = HAL_GetTick();
+        tick_step      = HAL_GetTick();
         s_index     = (uint8_t)((s_index + 1) % 4U);
-        pos_target_mech = s_targets[s_index];
+        g_target_angle = s_targets[s_index];
       }
     }
 #endif
@@ -324,158 +300,158 @@ int main(void)
 
     /* ---------- VOFA+ 示波器：每 5ms 推一帧（200Hz） ----------
        7 个通道，顺序就是 VOFA+ 里的通道 0~6：
-         0: w_cmd          给定机械角速度 rad/s
-         1: g_foc_dbg.we   电角速度 rad/s
-         2: g_foc_dbg.theta 电角度 rad
-         3: g_foc_dbg.uq   q 轴电压 V
+         0: g_target_speed          给定机械角速度 rad/s
+         1: g_foc_dbg.speed_e   电角速度 rad/s
+         2: g_foc_dbg.angle 电角度 rad
+         3: g_foc_dbg.voltage_q   q 轴电压 V
          4~6: 三相占空比 0~1 */
-    static uint32_t t_vofa = 0;
-    if (HAL_GetTick() - t_vofa >= VOFA_PERIOD_MS)
+    static uint32_t tick_vofa = 0;
+    if (HAL_GetTick() - tick_vofa >= VOFA_PERIOD_MS)
     {
-      t_vofa = HAL_GetTick();
+      tick_vofa = HAL_GetTick();
 
-      float channel_value[7];
+      float vofa_channel[7];
 
 #if ENC_TEST_MODE == 3
       /* ===== 升压扫描 =====
          ch0: 当前电压 V      ch1: 机械角 rad
          ch2: 建议 offset     ch3: 14 位计数 */
       {
-        uint16_t raw_value    = encoder_read_raw();
-        uint16_t angle_count  = (uint16_t)(raw_value >> ENC_ANGLE_SHIFT);
-        float    mech_rad     = (float)angle_count * ENC_TWO_PI / ENC_COUNTS_PER_REV;
-        float    elec_rad     = mech_rad * (float)ENC_POLE_PAIRS;
+        uint16_t raw_data    = encoder_read_raw();
+        uint16_t angle_count  = (uint16_t)(raw_data >> ENC_ANGLE_SHIFT);
+        float    angle_mech     = (float)angle_count * ENC_TWO_PI / ENC_COUNTS_PER_REV;
+        float    angle     = angle_mech * (float)ENC_POLE_PAIRS;
         float    offset_now;
 
-        while (elec_rad >= ENC_TWO_PI) { elec_rad -= ENC_TWO_PI; }
+        while (angle >= ENC_TWO_PI) { angle -= ENC_TWO_PI; }
 
-        offset_now = FOC_ALIGN_THETA + ENC_HALF_PI - elec_rad;
+        offset_now = FOC_ALIGN_THETA + ENC_HALF_PI - angle;
         while (offset_now <  0.0f)       { offset_now += ENC_TWO_PI; }
         while (offset_now >= ENC_TWO_PI) { offset_now -= ENC_TWO_PI; }
 
-        channel_value[0] = cal_uq;
-        channel_value[1] = mech_rad;
-        channel_value[2] = offset_now;
-        channel_value[3] = (float)angle_count;
-        channel_value[4] = 0.0f;
-        channel_value[5] = 0.0f;
-        channel_value[6] = 0.0f;
+        vofa_channel[0] = g_cal_voltage;
+        vofa_channel[1] = angle_mech;
+        vofa_channel[2] = offset_now;
+        vofa_channel[3] = (float)angle_count;
+        vofa_channel[4] = 0.0f;
+        vofa_channel[5] = 0.0f;
+        vofa_channel[6] = 0.0f;
       }
 #elif ENC_TEST_MODE == 4
-      /* offset 扫描：ch0 当前微调值 / ch1 实测角 / ch2 误差 / ch3 Uq */
-      channel_value[0] = cal_offset_trim;
-      channel_value[1] = g_foc_dbg.mech_measured;
-      channel_value[2] = g_foc_dbg.pos_error;
-      channel_value[3] = g_foc_dbg.uq;
-      channel_value[4] = g_foc_dbg.duty_a;
-      channel_value[5] = g_foc_dbg.duty_b;
-      channel_value[6] = g_foc_dbg.duty_c;
+      /* offset 扫描：ch0 当前微调值 / ch1 实测角 / ch2 误差 / ch3 voltage_q */
+      vofa_channel[0] = g_cal_offset;
+      vofa_channel[1] = g_foc_dbg.angle_mech;
+      vofa_channel[2] = g_foc_dbg.error_pos;
+      vofa_channel[3] = g_foc_dbg.voltage_q;
+      vofa_channel[4] = g_foc_dbg.duty_a;
+      vofa_channel[5] = g_foc_dbg.duty_b;
+      vofa_channel[6] = g_foc_dbg.duty_c;
 #elif ENC_TEST_MODE != 0
       /* ===== 编码器调试（模式 1 / 2）=====
          通道 0: 机械角 rad        1: 电角度 rad（未加 offset）
          通道 2: SPI 原始 16 位    3: 14 位角度计数 0~16383
          通道 4: 建议的 offset（把电角度归零所需的偏移量） */
       {
-        uint16_t raw_value    = encoder_read_raw();
-        uint16_t angle_count  = (uint16_t)(raw_value >> ENC_ANGLE_SHIFT);
-        float    mech_rad     = (float)angle_count * ENC_TWO_PI / ENC_COUNTS_PER_REV;
-        float    elec_rad     = mech_rad * (float)ENC_POLE_PAIRS;
+        uint16_t raw_data    = encoder_read_raw();
+        uint16_t angle_count  = (uint16_t)(raw_data >> ENC_ANGLE_SHIFT);
+        float    angle_mech     = (float)angle_count * ENC_TWO_PI / ENC_COUNTS_PER_REV;
+        float    angle     = angle_mech * (float)ENC_POLE_PAIRS;
         float    offset_hint;
 
-        while (elec_rad >= ENC_TWO_PI) { elec_rad -= ENC_TWO_PI; }
+        while (angle >= ENC_TWO_PI) { angle -= ENC_TWO_PI; }
 
         /* 预定位时电压矢量加在 FOC_ALIGN_THETA + 90° 方向，
            转子 d 轴会停在那里。所以 offset 应该让
-               (mech×7 + offset) 等于 FOC_ALIGN_THETA + π/2 */
-        offset_hint = FOC_ALIGN_THETA + ENC_HALF_PI - elec_rad;
+               (angle_mech × 极对数 + offset) 等于 FOC_ALIGN_THETA + π/2 */
+        offset_hint = FOC_ALIGN_THETA + ENC_HALF_PI - angle;
         while (offset_hint <  0.0f)        { offset_hint += ENC_TWO_PI; }
         while (offset_hint >= ENC_TWO_PI)  { offset_hint -= ENC_TWO_PI; }
 
-        channel_value[0] = mech_rad;
-        channel_value[1] = elec_rad;
-        channel_value[2] = (float)raw_value;
-        channel_value[3] = (float)angle_count;
-        channel_value[4] = offset_hint;
-        channel_value[5] = 0.0f;
-        channel_value[6] = 0.0f;
+        vofa_channel[0] = angle_mech;
+        vofa_channel[1] = angle;
+        vofa_channel[2] = (float)raw_data;
+        vofa_channel[3] = (float)angle_count;
+        vofa_channel[4] = offset_hint;
+        vofa_channel[5] = 0.0f;
+        vofa_channel[6] = 0.0f;
       }
 #else
 #if USE_SPEED_LOOP
-      /* 速度闭环：目标转速 / 实测转速 / 速度误差 / Uq / 三相占空比 */
-      channel_value[0] = g_foc_dbg.w_ref;            /* 目标转速 rad/s */
-      channel_value[1] = g_encoder_dbg.speed_radps;  /* 实测转速 rad/s */
-      channel_value[2] = g_foc_dbg.pos_error;        /* 速度误差 */
-      channel_value[3] = g_foc_dbg.uq;
-      channel_value[4] = g_foc_dbg.duty_a;
-      channel_value[5] = g_foc_dbg.duty_b;
-      channel_value[6] = g_foc_dbg.duty_c;
+      /* 速度闭环：目标转速 / 实测转速 / 速度误差 / voltage_q / 三相占空比 */
+      vofa_channel[0] = g_foc_dbg.target;            /* 目标转速 rad/s */
+      vofa_channel[1] = g_encoder_dbg.speed;  /* 实测转速 rad/s */
+      vofa_channel[2] = g_foc_dbg.error_pos;        /* 速度误差 */
+      vofa_channel[3] = g_foc_dbg.voltage_q;
+      vofa_channel[4] = g_foc_dbg.duty_a;
+      vofa_channel[5] = g_foc_dbg.duty_b;
+      vofa_channel[6] = g_foc_dbg.duty_c;
 #elif USE_POSITION_LOOP
       /* 位置闭环：目标角 / 实际角 / 误差 / 电压 / 三相占空比 */
-      channel_value[0] = g_foc_dbg.w_ref;
-      channel_value[1] = g_foc_dbg.mech_measured;
-      channel_value[2] = g_foc_dbg.pos_error;
-      channel_value[3] = g_foc_dbg.uq;
-      channel_value[4] = g_foc_dbg.duty_a;
-      channel_value[5] = g_foc_dbg.duty_b;
-      channel_value[6] = g_foc_dbg.duty_c;
+      vofa_channel[0] = g_foc_dbg.target;
+      vofa_channel[1] = g_foc_dbg.angle_mech;
+      vofa_channel[2] = g_foc_dbg.error_pos;
+      vofa_channel[3] = g_foc_dbg.voltage_q;
+      vofa_channel[4] = g_foc_dbg.duty_a;
+      vofa_channel[5] = g_foc_dbg.duty_b;
+      vofa_channel[6] = g_foc_dbg.duty_c;
 #else
-      /* 开环：w_cmd / 【编码器算出的机械角速度】 / theta / uq / 三相占空比
+      /* 开环：g_target_speed / 【编码器算出的机械角速度】 / angle / voltage_q / 三相占空比
          ch1 是"编码器读数变化速度"：
            正值 = 编码器读数在增大
            负值 = 编码器读数在减小
          开环给 +3 rad/s 时，ch1 应该读到 +3 左右。
          如果读到 -3，说明编码器方向和磁场方向相反，ENC_DIR 要改成 -1。 */
       {
-        static float    s_last_mech_rad  = 0.0f;
-        static uint32_t s_last_read_tick = 0;
-        static float    s_speed_filtered = 0.0f;
-        float    mech_now  = encoder_read_mech();
+        static float    s_last_angle  = 0.0f;
+        static uint32_t s_last_tick = 0;
+        static float    s_speed = 0.0f;
+        float    angle_now  = encoder_read_mech();
         uint32_t tick_now  = HAL_GetTick();
-        float    speed_now;
+        float    speed;
 
-        if (s_last_read_tick != 0 && tick_now != s_last_read_tick)
+        if (s_last_tick != 0 && tick_now != s_last_tick)
         {
-          float delta_rad = mech_now - s_last_mech_rad;
-          float dt_sec    = (float)(tick_now - s_last_read_tick) * 0.001f;
-          float instant;
+          float delta_angle = angle_now - s_last_angle;
+          float dt    = (float)(tick_now - s_last_tick) * 0.001f;
+          float speed_instant;
 
           /* 过零处理：实际转过的角度一定小于半圈 */
-          if (delta_rad >  ENC_PI) { delta_rad -= ENC_TWO_PI; }
-          if (delta_rad < -ENC_PI) { delta_rad += ENC_TWO_PI; }
+          if (delta_angle >  ENC_PI) { delta_angle -= ENC_TWO_PI; }
+          if (delta_angle < -ENC_PI) { delta_angle += ENC_TWO_PI; }
 
-          instant = delta_rad / dt_sec;
+          speed_instant = delta_angle / dt;
 
           /* 合理性检查：这台电机不可能超过 15 rad/s。
              超出的都是编码器偶发跳读，直接丢掉这一拍，不污染滤波值 */
-          if (instant > 15.0f || instant < -15.0f)
+          if (speed_instant > 15.0f || speed_instant < -15.0f)
           {
-            instant = s_speed_filtered;   /* 用上一次的值顶上 */
+            speed_instant = s_speed;   /* 用上一次的值顶上 */
           }
 
           /* 一阶低通，时间常数 0.5 秒，把残余毛刺平均掉 */
-          s_speed_filtered += (instant - s_speed_filtered) * (dt_sec / 0.5f);
+          s_speed += (speed_instant - s_speed) * (dt / 0.5f);
         }
 
-        s_last_mech_rad  = mech_now;
-        s_last_read_tick = tick_now;
-        speed_now        = s_speed_filtered;
+        s_last_angle  = angle_now;
+        s_last_tick = tick_now;
+        speed        = s_speed;
 
-        channel_value[0] = w_cmd;
-        channel_value[1] = speed_now;
-        /* ch2 = 直接反推出来的电角度偏移：磁场角 − 7×机械角
+        vofa_channel[0] = g_target_speed;
+        vofa_channel[1] = speed;
+        /* ch2 = 直接反推出来的电角度偏移：磁场角 − 极对数 × 机械角
            开环慢速转、转子不丢步时，这个值应该是一个**常数**，
            那个常数就是正确的 ENC_ELEC_OFFSET */
         {
-          float offset_now = g_foc_dbg.theta
-                           - (float)ENC_POLE_PAIRS * mech_now;
+          float offset_now = g_foc_dbg.angle
+                           - (float)ENC_POLE_PAIRS * angle_now;
           while (offset_now <  0.0f)       { offset_now += ENC_TWO_PI; }
           while (offset_now >= ENC_TWO_PI) { offset_now -= ENC_TWO_PI; }
-          channel_value[2] = offset_now;
+          vofa_channel[2] = offset_now;
         }
-        channel_value[3] = g_foc_dbg.uq;
-        channel_value[4] = g_foc_dbg.duty_a;
-        channel_value[5] = g_foc_dbg.duty_b;
-        channel_value[6] = g_foc_dbg.duty_c;
+        vofa_channel[3] = g_foc_dbg.voltage_q;
+        vofa_channel[4] = g_foc_dbg.duty_a;
+        vofa_channel[5] = g_foc_dbg.duty_b;
+        vofa_channel[6] = g_foc_dbg.duty_c;
       }
 #endif
 #endif
@@ -483,17 +459,17 @@ int main(void)
 #if VOFA_USE_TEXT
       /* FireWater：发 "2.000,14.000,6.283,1.640,0.500,0.558,0.442\n"
          优点是人眼/串口助手直接能看懂，调通阶段建议先用这个 */
-      (void)vofa_send_text(channel_value, 7);
+      (void)vofa_send_text(vofa_channel, 7);
 #else
       /* JustFloat：浮点二进制 + 帧尾 00 00 80 7F，带宽省 */
       vofa_begin();
-      vofa_put(channel_value[0]);
-      vofa_put(channel_value[1]);
-      vofa_put(channel_value[2]);
-      vofa_put(channel_value[3]);
-      vofa_put(channel_value[4]);
-      vofa_put(channel_value[5]);
-      vofa_put(channel_value[6]);
+      vofa_put(vofa_channel[0]);
+      vofa_put(vofa_channel[1]);
+      vofa_put(vofa_channel[2]);
+      vofa_put(vofa_channel[3]);
+      vofa_put(vofa_channel[4]);
+      vofa_put(vofa_channel[5]);
+      vofa_put(vofa_channel[6]);
       (void)vofa_end();              /* 忙就丢帧，不阻塞电机控制 */
 #endif
     }
@@ -703,15 +679,15 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   if (htim->Instance == TIM1)
   {
 #if ENC_TEST_MODE == 3
-    foc_step_static(FOC_ALIGN_THETA, cal_uq);
+    foc_static(FOC_ALIGN_THETA, g_cal_voltage);
 #elif ENC_TEST_MODE == 4
-    foc_step_position(pos_target_mech);   /* offset 扫描时位置环照常跑 */
+    foc_close_position(g_target_angle);   /* offset 扫描时位置环照常跑 */
 #elif USE_SPEED_LOOP
-    foc_step_speed(w_cmd);
+    foc_close_speed(g_target_speed);
 #elif USE_POSITION_LOOP
-    foc_step_position(pos_target_mech);
+    foc_close_position(g_target_angle);
 #else
-    foc_step_openloop(w_cmd);
+    foc_open(g_target_speed);
 #endif
   }
 }

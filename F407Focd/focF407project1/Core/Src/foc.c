@@ -1,155 +1,95 @@
-/* ============================================================
- *  foc.c  ——  FOC 开环控制（直白版）
- * ------------------------------------------------------------
- *  整条链路（从上往下读）：
- *
- *    期望转速 w_ref
- *      → 电角速度 we = w_ref × 极对数
- *      → 电角度 theta = 累加 we × Ts
- *      → 电压 Uq = 斜率 × |we| + 低速补偿
- *      → 反 Park：  Ualpha = -Uq·sin(theta)
- *                   Ubeta  =  Uq·cos(theta)
- *      → 反 Clarke：Ua =  Ualpha
- *                   Ub = -0.5·Ualpha + 0.866·Ubeta
- *                   Uc = -0.5·Ualpha - 0.866·Ubeta
- *      → 加共模：   Ucom = -(最大 + 最小) / 2
- *      → 转占空比：T = 0.5 + U / 电源电压
- *      → 写比较值：CCR = T × 4199
- * ============================================================ */
-
 #include "foc.h"
 #include "encoder.h"
 #include <math.h>
 
-/* CubeMX 在 main.c 里定义的定时器，这里引用 */
 extern TIM_HandleTypeDef htim1;
 
 /* ---------- 内部变量（只在本文件用） ---------- */
-static float g_theta_e = 0.0f;    /* 当前开环累加的电角度，弧度 */
-static float g_we      = 0.0f;    /* 当前电角速度，弧度/秒 */
-static float g_mech_measured = 0.0f;  /* 编码器实测机械角，给调试看 */
-static float g_pos_error     = 0.0f;  /* 最近一次位置误差，给调试看 */
-static float g_pos_integral  = 0.0f;  /* 位置环积分项，单位伏 */
-static float g_elec_offset_trim = 0.0f; /* 电角度微调，offset 扫描标定用 */
-static float g_speed_integral   = 0.0f; /* 速度环积分项，单位伏 */
-static uint32_t g_stall_count   = 0;    /* 速度环"卡住"计数 */
+static float g_angle = 0.0f;    /* 当前开环累加的电角度，弧度 */
+static float g_speed_e      = 0.0f;    /* 当前电角速度，弧度/秒 */
+static float g_angle_mech = 0.0f;  /* 编码器实测机械角，给调试看 */
+static float g_error_pos     = 0.0f;  /* 最近一次位置误差，给调试看 */
+static float g_integral_pos  = 0.0f;  /* 位置环积分项，单位伏 */
+static float g_offset_trim = 0.0f; /* 电角度微调，offset 扫描标定用 */
+static float g_integral_speed   = 0.0f; /* 速度环积分项，单位伏 */
+static uint32_t g_stall   = 0;    /* 速度环"卡住"计数 */
 
-/* 主循环改这个值，中断里会立刻用上 */
-void foc_set_elec_offset_trim(float trim_rad)
+void foc_set_offset_trim(float trim)
 {
-    g_elec_offset_trim = trim_rad;
+    g_offset_trim = trim;
 }
 
-/* ---------- 调试观测量：给 VOFA+ 看波形 ----------
-   中断里写、主循环里读。里面每个成员都是 32 位 float，
-   单个成员的读写不会被拆开，所以不需要加锁。 */
 volatile foc_debug_t g_foc_dbg;
 
-/* 一个圆周是 2π */
 #define TWO_PI   6.28318530f
 
-/* 半个圆周是 π（不叫 PI，避免和 math.h / arm_math.h 的宏撞名） */
 #define FOC_PI   3.14159265f
 
-/* √3/2 = 0.866，反 Clarke 要用 */
 #define SQRT3_2  0.86602540f
 
-
-/* ============================================================
- *  初始化
- * ============================================================ */
 void foc_init(void)
 {
-    g_theta_e        = 0.0f;
-    g_we             = 0.0f;
-    g_pos_integral   = 0.0f;
-    g_speed_integral = 0.0f;
+    g_angle        = 0.0f;
+    g_speed_e             = 0.0f;
+    g_integral_pos   = 0.0f;
+    g_integral_speed = 0.0f;
 }
 
-
-/* ============================================================
- *  速度生成器：电角速度 → 电压 Uq
- * ------------------------------------------------------------
- *  开环没有编码器，测不到真实转速，所以用最简单的线性关系：
- *
- *      Uq = FOC_KVF × |we| + FOC_U_OFFSET
- *
- *  转速越高给越大的电压，保证磁场够强不会失步。
- *  we 取绝对值，因为转向由角度 theta 的方向决定。
- * ============================================================ */
-float foc_speed_generator(float w_e)
+float foc_voltage_vf(float speed_e)
 {
-    float uq;
+    float voltage_q;
 
-    if (w_e < 0.0f)
+    if (speed_e < 0.0f)
     {
-        w_e = -w_e;                 /* 取绝对值 */
+        speed_e = -speed_e;
     }
 
-    uq = FOC_KVF * w_e + FOC_U_OFFSET;
+    voltage_q = FOC_VF_SLOPE * speed_e + FOC_VOLT_OFFSET;
 
-    if (uq > VQ_MAX)                /* 不能超过 6.92V，否则波形削顶 */
+    if (voltage_q > FOC_VOLTAGE_MAX)
     {
-        uq = VQ_MAX;
+        voltage_q = FOC_VOLTAGE_MAX;
     }
 
-    return uq;
+    return voltage_q;
 }
 
-
-/* ============================================================
- *  转子预定位
- * ------------------------------------------------------------
- *  电角度固定不动，给一个小的 q 轴电压。
- *  电压矢量停在空间某个固定方向，转子磁钢会被吸过去对齐。
- * ============================================================ */
 void foc_align(void)
 {
-    float Uq;
-    float Ualpha, Ubeta;
-    float Ua, Ub, Uc;
-    float Umax, Umin, Ucom;
-    float Ta, Tb, Tc;
+    float voltage_q;
+    float u_alpha, u_beta;
+    float u_a, u_b, u_c;
+    float u_max, u_min, u_com;
+    float duty_a, duty_b, duty_c;
 
-    Uq = FOC_ALIGN_VOLTAGE;         /* 专用预定位电压，必须够大才吸得动 */
+    voltage_q = FOC_ALIGN_VOLTAGE;
 
-    /* 让开环中断接下来继续用这个角度（w_cmd=0 时 theta 就停在这里） */
-    g_theta_e = FOC_ALIGN_THETA;
+    g_angle = FOC_ALIGN_THETA;
 
-    /* 反 Park：把电压矢量加在 FOC_ALIGN_THETA + 90° 的方向上
-       （theta=0 时就是 Ualpha=0、Ubeta=Uq，和以前一样） */
-    Ualpha = -Uq * sinf(FOC_ALIGN_THETA);
-    Ubeta  =  Uq * cosf(FOC_ALIGN_THETA);
+    u_alpha = -voltage_q * sinf(FOC_ALIGN_THETA);
+    u_beta  =  voltage_q * cosf(FOC_ALIGN_THETA);
 
-    /* 反 Clarke */
-    Ua =  Ualpha;
-    Ub = -0.5f * Ualpha + SQRT3_2 * Ubeta;
-    Uc = -0.5f * Ualpha - SQRT3_2 * Ubeta;
+    u_a =  u_alpha;
+    u_b = -0.5f * u_alpha + SQRT3_2 * u_beta;
+    u_c = -0.5f * u_alpha - SQRT3_2 * u_beta;
 
-    /* 共模注入 */
-    Umax = Ua;
-    if (Ub > Umax) { Umax = Ub; }
-    if (Uc > Umax) { Umax = Uc; }
-    Umin = Ua;
-    if (Ub < Umin) { Umin = Ub; }
-    if (Uc < Umin) { Umin = Uc; }
-    Ucom = -(Umax + Umin) * 0.5f;
+    u_max = u_a;
+    if (u_b > u_max) { u_max = u_b; }
+    if (u_c > u_max) { u_max = u_c; }
+    u_min = u_a;
+    if (u_b < u_min) { u_min = u_b; }
+    if (u_c < u_min) { u_min = u_c; }
+    u_com = -(u_max + u_min) * 0.5f;
 
-    /* 转占空比 */
-    Ta = 0.5f + (Ua + Ucom) / VDC_BUS;
-    Tb = 0.5f + (Ub + Ucom) / VDC_BUS;
-    Tc = 0.5f + (Uc + Ucom) / VDC_BUS;
+    duty_a = 0.5f + (u_a + u_com) / VDC_BUS;
+    duty_b = 0.5f + (u_b + u_com) / VDC_BUS;
+    duty_c = 0.5f + (u_c + u_com) / VDC_BUS;
 
-    /* 写死三路比较值 */
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, (uint32_t)(Ta * PWM_ARR));
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, (uint32_t)(Tb * PWM_ARR));
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, (uint32_t)(Tc * PWM_ARR));
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, (uint32_t)(duty_a * PWM_ARR));
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, (uint32_t)(duty_b * PWM_ARR));
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, (uint32_t)(duty_c * PWM_ARR));
 }
 
-
-/* ============================================================
- *  停机
- * ============================================================ */
 void foc_stop(void)
 {
     uint32_t half = (uint32_t)(0.5f * PWM_ARR);
@@ -159,12 +99,6 @@ void foc_stop(void)
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, half);
 }
 
-
-/* ============================================================
- *  小工具：角度归一化
- * ============================================================ */
-
-/* 折回 0 ~ 2π */
 static float wrap_two_pi(float angle)
 {
     while (angle >= TWO_PI) { angle -= TWO_PI; }
@@ -172,7 +106,6 @@ static float wrap_two_pi(float angle)
     return angle;
 }
 
-/* 折回 -π ~ +π，用来算"走近路"的角度误差 */
 static float wrap_pi(float angle)
 {
     while (angle >  FOC_PI) { angle -= TWO_PI; }
@@ -180,294 +113,205 @@ static float wrap_pi(float angle)
     return angle;
 }
 
-
-/* ============================================================
- *  输出级：电角度 + q 轴电压  →  三相占空比  →  CCR
- * ------------------------------------------------------------
- *  这一段的输入只有两个量：
- *      theta : 电角度（开环是自己算的，闭环是编码器给的）
- *      Uq    : q 轴电压（开环是 V/f 曲线给的，闭环是位置环给的）
- *  开环和闭环共用它，避免两份重复代码
- * ============================================================ */
-static void foc_output(float theta, float Uq)
+static void foc_output(float angle, float voltage_q)
 {
-    float Ualpha, Ubeta;            /* 静止两相 */
-    float Ua, Ub, Uc;               /* 三相电压 */
-    float Umax, Umin, Ucom;         /* 共模注入用 */
-    float Ta, Tb, Tc;               /* 三相占空比 */
-    uint32_t ccr1, ccr2, ccr3;      /* 写进定时器的值 */
+    float u_alpha, u_beta;
+    float u_a, u_b, u_c;
+    float u_max, u_min, u_com;
+    float duty_a, duty_b, duty_c;
+    uint32_t ccr_a, ccr_b, ccr_c;
 
-    /* ---------- 反 Park 变换 ----------
-       dq 坐标转 αβ 坐标（Ud = 0，所以只剩下两项） */
-    Ualpha = -Uq * sinf(theta);
-    Ubeta  =  Uq * cosf(theta);
+    u_alpha = -voltage_q * sinf(angle);
+    u_beta  =  voltage_q * cosf(angle);
 
-    /* ---------- 反 Clarke 变换 ----------
-       αβ 坐标转三相 abc */
-    Ua =  Ualpha;
-    Ub = -0.5f * Ualpha + SQRT3_2 * Ubeta;
-    Uc = -0.5f * Ualpha - SQRT3_2 * Ubeta;
+    u_a =  u_alpha;
+    u_b = -0.5f * u_alpha + SQRT3_2 * u_beta;
+    u_c = -0.5f * u_alpha - SQRT3_2 * u_beta;
 
-    /* ---------- 共模注入（SVPWM） ----------
-       把三相整体上下平移，不改变线电压，但能提高电压利用率 */
-    Umax = Ua;
-    if (Ub > Umax) { Umax = Ub; }
-    if (Uc > Umax) { Umax = Uc; }
+    u_max = u_a;
+    if (u_b > u_max) { u_max = u_b; }
+    if (u_c > u_max) { u_max = u_c; }
 
-    Umin = Ua;
-    if (Ub < Umin) { Umin = Ub; }
-    if (Uc < Umin) { Umin = Uc; }
+    u_min = u_a;
+    if (u_b < u_min) { u_min = u_b; }
+    if (u_c < u_min) { u_min = u_c; }
 
-    Ucom = -(Umax + Umin) * 0.5f;
+    u_com = -(u_max + u_min) * 0.5f;
 
-    Ua = Ua + Ucom;
-    Ub = Ub + Ucom;
-    Uc = Uc + Ucom;
+    u_a = u_a + u_com;
+    u_b = u_b + u_com;
+    u_c = u_c + u_com;
 
-    /* ---------- 电压转占空比 ----------
-       电压 0V → 占空比 50%
-       电压 +6V → 占空比 100%
-       电压 -6V → 占空比 0% */
-    Ta = 0.5f + Ua / VDC_BUS;
-    Tb = 0.5f + Ub / VDC_BUS;
-    Tc = 0.5f + Uc / VDC_BUS;
+    duty_a = 0.5f + u_a / VDC_BUS;
+    duty_b = 0.5f + u_b / VDC_BUS;
+    duty_c = 0.5f + u_c / VDC_BUS;
 
-    /* 限制在 0 ~ 1 之间，防止越界 */
-    if (Ta < 0.0f) { Ta = 0.0f; }
-    if (Ta > 1.0f) { Ta = 1.0f; }
-    if (Tb < 0.0f) { Tb = 0.0f; }
-    if (Tb > 1.0f) { Tb = 1.0f; }
-    if (Tc < 0.0f) { Tc = 0.0f; }
-    if (Tc > 1.0f) { Tc = 1.0f; }
+    if (duty_a < 0.0f) { duty_a = 0.0f; }
+    if (duty_a > 1.0f) { duty_a = 1.0f; }
+    if (duty_b < 0.0f) { duty_b = 0.0f; }
+    if (duty_b > 1.0f) { duty_b = 1.0f; }
+    if (duty_c < 0.0f) { duty_c = 0.0f; }
+    if (duty_c > 1.0f) { duty_c = 1.0f; }
 
-    /* ---------- 存观测量，给 VOFA+ 用 ---------- */
-    g_foc_dbg.theta  = theta;
-    g_foc_dbg.uq     = Uq;
-    g_foc_dbg.duty_a = Ta;
-    g_foc_dbg.duty_b = Tb;
-    g_foc_dbg.duty_c = Tc;
+    g_foc_dbg.angle     = angle;
+    g_foc_dbg.voltage_q = voltage_q;
+    g_foc_dbg.duty_a    = duty_a;
+    g_foc_dbg.duty_b    = duty_b;
+    g_foc_dbg.duty_c    = duty_c;
 
-    /* ---------- 写进定时器：占空比 × 4199 = 比较值 ---------- */
-    ccr1 = (uint32_t)(Ta * PWM_ARR);
-    ccr2 = (uint32_t)(Tb * PWM_ARR);
-    ccr3 = (uint32_t)(Tc * PWM_ARR);
+    ccr_a = (uint32_t)(duty_a * PWM_ARR);
+    ccr_b = (uint32_t)(duty_b * PWM_ARR);
+    ccr_c = (uint32_t)(duty_c * PWM_ARR);
 
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, ccr1);
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, ccr2);
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, ccr3);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, ccr_a);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, ccr_b);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, ccr_c);
 }
 
-
-/* ============================================================
- *  开环控制  foc_step_openloop
- * ------------------------------------------------------------
- *  输入：期望机械角速度 w_ref，单位 弧度/秒
- *  角度自己积分出来，电压按 V/f 曲线给
- * ============================================================ */
-void foc_step_openloop(float w_ref_mech)
+void foc_open(float target_speed)
 {
-    float we;                       /* 电角速度 */
-    float theta;                    /* 电角度 */
-    float Uq;                       /* q 轴电压 */
+    float speed_e;
+    float angle;
+    float voltage_q;
 
-    /* ---------- 第 1 步：机械角速度 → 电角速度 ---------- */
-    we = w_ref_mech * (float)FOC_POLE_PAIRS;
-    g_we = we;
+    speed_e = target_speed * (float)FOC_POLE_PAIRS;
+    g_speed_e = speed_e;
 
-    /* ---------- 第 2 步：电角度累加 ----------
-       开环的关键：角度不是测量出来的，是我们自己算的。 */
-    theta = g_theta_e + we * FOC_TS;
-    theta = wrap_two_pi(theta);
-    g_theta_e = theta;
+    angle = g_angle + speed_e * FOC_TS;
+    angle = wrap_two_pi(angle);
+    g_angle = angle;
 
-    /* ---------- 第 3 步：算电压 Uq（V/f 曲线） ---------- */
-    Uq = foc_speed_generator(we);
+    voltage_q = foc_voltage_vf(speed_e);
 
-    /* ---------- 记录 --- */
-    g_foc_dbg.w_ref = w_ref_mech;
-    g_foc_dbg.we    = we;
+    /* 安全限幅：V/f 曲线在高速时会给出几伏甚至接近母线电压，
+       但那只是 SVPWM 的物理极限，不是芯片散热能承受的。
+       必须和闭环一样受 FOC_UQ_LIMIT 约束，否则改大 TARGET_SPEED 会烧板子。 */
+    if (voltage_q >  FOC_UQ_LIMIT) { voltage_q =  FOC_UQ_LIMIT; }
+    if (voltage_q < -FOC_UQ_LIMIT) { voltage_q = -FOC_UQ_LIMIT; }
 
-    /* ---------- 第 4~9 步：交给输出级 --- */
-    foc_output(theta, Uq);
+    g_foc_dbg.target  = target_speed;
+    g_foc_dbg.speed_e = speed_e;
+
+    foc_output(angle, voltage_q);
 }
 
-
-/* ============================================================
- *  静态输出（标定用）
- * ------------------------------------------------------------
- *  给一个固定方向、固定大小的电压矢量，不做任何闭环。
- *  转子会被磁场吸到某个固定位置，用来反推电角度零位。
- * ============================================================ */
-void foc_step_static(float theta_rad, float uq)
+void foc_static(float target_angle, float voltage_q)
 {
-    g_foc_dbg.w_ref = theta_rad;
-    g_foc_dbg.we    = 0.0f;
-    foc_output(wrap_two_pi(theta_rad), uq);
+    g_foc_dbg.target  = target_angle;
+    g_foc_dbg.speed_e = 0.0f;
+    foc_output(wrap_two_pi(target_angle), voltage_q);
 }
 
-
-/* ============================================================
- *  位置闭环  foc_step_position  ★ L1 ★
- * ------------------------------------------------------------
- *  输入：目标机械角度 target_mech_rad，单位 弧度，0 ~ 2π
- *
- *  和开环的区别只有两点：
- *    1. theta 不再自己积分，而是编码器实测（乘极对数 + 零位偏移）
- *    2. Uq 不再是 V/f 曲线，而是"位置误差 × Kp"
- *
- *  注意：这里 Uq 是**电压**不是力矩。要真正控力矩得上电流环（L3）。
- * ============================================================ */
-void foc_step_position(float target_mech_rad)
+void foc_close_position(float target_angle)
 {
-    float mech_rad;                 /* 编码器实测机械角 */
-    float elec_rad;                 /* 换算出的电角度（= 转子 d 轴） */
-    float error_rad;                /* 位置误差，-π ~ +π */
-    float Uq;                       /* q 轴电压 */
+    float angle_mech;
+    float angle;
+    float error_pos;
+    float voltage_q;
 
-    /* ---------- 第 1 步：读编码器，得到机械角和转速 ---------- */
     encoder_update();
-    mech_rad = g_encoder_dbg.mech_rad;
-    g_mech_measured = mech_rad;
+    angle_mech = g_encoder_dbg.angle_mech;
+    g_angle_mech = angle_mech;
 
-    /* ---------- 第 2 步：机械角 → 电角度 ----------
-       乘极对数，再加上标定出来的零位偏移，才真正对得上转子 d 轴 */
-    elec_rad = wrap_two_pi(mech_rad * (float)FOC_POLE_PAIRS
+    angle = wrap_two_pi(angle_mech * (float)FOC_POLE_PAIRS
                          + ENC_ELEC_OFFSET
-                         + g_elec_offset_trim);
+                         + g_offset_trim);
 
-    /* ---------- 第 3 步：算位置误差，走近路 ----------
-       目标 6.2、当前 0.1 时，直接相减是 6.1，走近路应该是 -0.18 */
-    error_rad = wrap_pi(target_mech_rad - mech_rad);
-    g_pos_error = error_rad;
+    error_pos = wrap_pi(target_angle - angle_mech);
+    g_error_pos = error_pos;
 
-    /* ---------- 第 4 步：PID 控制 → 电压 ----------
-       P 项：误差越大，拉回来的力气越大
-       I 项：把残差持续累积，克服静摩擦造成的稳态误差
-       D 项：转得越快，反向刹车越多，防止冲过头来回摆 */
-    g_pos_integral += FOC_POS_KI * error_rad * FOC_TS;
+    g_integral_pos += FOC_POS_KI * error_pos * FOC_TS;
 
-    /* 抗积分饱和：积分项自己也不能超过电压限幅，否则退饱和会很慢 */
-    if (g_pos_integral >  FOC_UQ_LIMIT) { g_pos_integral =  FOC_UQ_LIMIT; }
-    if (g_pos_integral < -FOC_UQ_LIMIT) { g_pos_integral = -FOC_UQ_LIMIT; }
+    if (g_integral_pos >  FOC_UQ_LIMIT) { g_integral_pos =  FOC_UQ_LIMIT; }
+    if (g_integral_pos < -FOC_UQ_LIMIT) { g_integral_pos = -FOC_UQ_LIMIT; }
 
-    Uq = FOC_POS_KP * error_rad
-       + g_pos_integral
-       - FOC_POS_KD * g_encoder_dbg.speed_radps;
+    voltage_q = FOC_POS_KP * error_pos
+       + g_integral_pos
+       - FOC_POS_KD * g_encoder_dbg.speed;
 
-    /* 转矩方向：矢量和 d 轴相对方向反了时用 -1 翻转 */
-    Uq = FOC_TORQUE_SIGN * Uq;
+    voltage_q = FOC_TORQUE_SIGN * voltage_q;
 
-    /* 硬限幅：再大就过流了 */
-    if (Uq >  FOC_UQ_LIMIT) { Uq =  FOC_UQ_LIMIT; }
-    if (Uq < -FOC_UQ_LIMIT) { Uq = -FOC_UQ_LIMIT; }
+    if (voltage_q >  FOC_UQ_LIMIT) { voltage_q =  FOC_UQ_LIMIT; }
+    if (voltage_q < -FOC_UQ_LIMIT) { voltage_q = -FOC_UQ_LIMIT; }
 
-    /* ---------- 记录 --- */
-    g_foc_dbg.w_ref         = target_mech_rad;
-    g_foc_dbg.we            = g_encoder_dbg.speed_radps * (float)FOC_POLE_PAIRS;
-    g_foc_dbg.mech_measured = mech_rad;
-    g_foc_dbg.pos_error     = error_rad;
+    g_foc_dbg.target     = target_angle;
+    g_foc_dbg.speed_e    = g_encoder_dbg.speed * (float)FOC_POLE_PAIRS;
+    g_foc_dbg.angle_mech = angle_mech;
+    g_foc_dbg.error_pos  = error_pos;
 
-    /* ---------- 第 5~10 步：交给输出级 --- */
-    foc_output(elec_rad, Uq);
+    foc_output(angle, voltage_q);
 }
 
-
-/* ============================================================
- *  速度闭环  foc_step_speed  ★ L2 ★
- * ------------------------------------------------------------
- *  输入：目标机械角速度 target_speed_radps，单位 弧度/秒
- *        正数正转，负数反转，0 停住
- *
- *  和位置环的区别：反馈量从"位置"换成"速度"，输出电压由
- *      V/f 前馈（按目标转速给一个基准电压）
- *    + PI 修正（把实测速度和目标之间的差补掉）
- *  组成。加前馈的好处是 PI 不用从零开始堆积分，响应快很多。
- * ============================================================ */
-void foc_step_speed(float target_speed_radps)
+void foc_close_speed(float target_speed)
 {
-    float mech_rad;                 /* 编码器实测机械角 */
-    float speed_radps;              /* 编码器实测机械角速度 */
-    float elec_rad;                 /* 换算出的电角度 */
-    float error_radps;              /* 速度误差 */
-    float feedforward;              /* V/f 前馈电压 */
-    float we;                       /* 目标电角速度 */
-    float Uq;
+    float angle_mech;
+    float speed;
+    float angle;
+    float error_speed;
+    float feed_forward;
+    float speed_e;
+    float voltage_q;
     float direction;
 
-    /* ---------- 第 1 步：读编码器，同时拿到位置和速度 ---------- */
     encoder_update();
-    mech_rad    = g_encoder_dbg.mech_rad;
-    speed_radps = g_encoder_dbg.speed_radps;
+    angle_mech    = g_encoder_dbg.angle_mech;
+    speed = g_encoder_dbg.speed;
 
-    /* ---------- 第 2 步：机械角 → 电角度 ---------- */
-    elec_rad = wrap_two_pi(mech_rad * (float)FOC_POLE_PAIRS
+    angle = wrap_two_pi(angle_mech * (float)FOC_POLE_PAIRS
                          + ENC_ELEC_OFFSET
-                         + g_elec_offset_trim);
+                         + g_offset_trim);
 
-    /* ---------- 第 3 步：速度误差 ---------- */
-    error_radps = target_speed_radps - speed_radps;
+    error_speed = target_speed - speed;
 
-    /* ---------- 第 4 步：V/f 前馈 ----------
-       按"目标转速"算一个基准电压，PI 只负责修正剩下的差。
-       方向和目标转速一致；幅值只看转速绝对值。 */
-    we = target_speed_radps * (float)FOC_POLE_PAIRS;
-    direction = (we >= 0.0f) ? 1.0f : -1.0f;
-    if (we < 0.0f) { we = -we; }
+    speed_e = target_speed * (float)FOC_POLE_PAIRS;
+    direction = (speed_e >= 0.0f) ? 1.0f : -1.0f;
+    if (speed_e < 0.0f) { speed_e = -speed_e; }
 
-    feedforward = direction * (FOC_KVF * we + FOC_U_OFFSET);
+    feed_forward = direction * (FOC_VF_SLOPE * speed_e + FOC_VOLT_OFFSET);
 
-    /* ---------- 第 5 步：PI 修正 ---------- */
-    g_speed_integral += FOC_SPD_KI * error_radps * FOC_TS;
+    g_integral_speed += FOC_SPEED_KI * error_speed * FOC_TS;
 
-    /* 抗积分饱和 */
-    if (g_speed_integral >  FOC_UQ_LIMIT) { g_speed_integral =  FOC_UQ_LIMIT; }
-    if (g_speed_integral < -FOC_UQ_LIMIT) { g_speed_integral = -FOC_UQ_LIMIT; }
+    if (g_integral_speed >  FOC_UQ_LIMIT) { g_integral_speed =  FOC_UQ_LIMIT; }
+    if (g_integral_speed < -FOC_UQ_LIMIT) { g_integral_speed = -FOC_UQ_LIMIT; }
 
-    Uq = feedforward
-       + FOC_SPD_KP * error_radps
-       + g_speed_integral;
+    voltage_q = feed_forward
+       + FOC_SPEED_KP * error_speed
+       + g_integral_speed;
 
-    /* ---------- 起动冲击（对付静摩擦） ----------
-       这台电机静摩擦明显大于动摩擦，从静止起步会卡住。
-       检测"目标非零、实测几乎为 0"，就周期性补一个额外电压把它踹起来。 */
-    if (target_speed_radps > 0.2f || target_speed_radps < -0.2f)
+    if (target_speed > 0.2f || target_speed < -0.2f)
     {
-        if (speed_radps < 0.1f && speed_radps > -0.1f)
+        if (speed < 0.1f && speed > -0.1f)
         {
-            g_stall_count++;
-            if (g_stall_count > FOC_STALL_TIME)
+            g_stall++;
+            if (g_stall > FOC_STALL_TICKS)
             {
-                Uq += direction * FOC_START_BOOST;
+                voltage_q += direction * FOC_START_BOOST;
             }
-            /* 踹 0.2 秒后清零，停一下再踹，避免连续大电流 */
-            if (g_stall_count > FOC_BOOST_CYCLE)
+
+            if (g_stall > FOC_BOOST_TICKS)
             {
-                g_stall_count = 0;
+                g_stall = 0;
             }
         }
         else
         {
-            g_stall_count = 0;      /* 转起来了，取消冲击 */
+            g_stall = 0;
         }
     }
     else
     {
-        g_stall_count = 0;          /* 目标为 0，不需要 */
+        g_stall = 0;
     }
 
-    /* 转矩方向 */
-    Uq = FOC_TORQUE_SIGN * Uq;
+    voltage_q = FOC_TORQUE_SIGN * voltage_q;
 
-    /* 硬限幅 */
-    if (Uq >  FOC_UQ_LIMIT) { Uq =  FOC_UQ_LIMIT; }
-    if (Uq < -FOC_UQ_LIMIT) { Uq = -FOC_UQ_LIMIT; }
+    if (voltage_q >  FOC_UQ_LIMIT) { voltage_q =  FOC_UQ_LIMIT; }
+    if (voltage_q < -FOC_UQ_LIMIT) { voltage_q = -FOC_UQ_LIMIT; }
 
-    /* ---------- 记录 --- */
-    g_foc_dbg.w_ref         = target_speed_radps;
-    g_foc_dbg.we            = speed_radps * (float)FOC_POLE_PAIRS;
-    g_foc_dbg.mech_measured = mech_rad;
-    g_foc_dbg.pos_error     = error_radps;   /* 这里放的是速度误差 */
+    g_foc_dbg.target     = target_speed;
+    g_foc_dbg.speed_e    = speed * (float)FOC_POLE_PAIRS;
+    g_foc_dbg.angle_mech = angle_mech;
+    g_foc_dbg.error_pos  = error_speed;
 
-    /* ---------- 输出 --- */
-    foc_output(elec_rad, Uq);
+    foc_output(angle, voltage_q);
 }

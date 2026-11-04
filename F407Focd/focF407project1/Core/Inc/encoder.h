@@ -28,10 +28,10 @@
  * ============================================================ */
 
 /* MT6701 是 14 位，每机械圈 16384 个计数 */
-#define ENC_COUNTS_PER_REV   16384.0f
+#define ENC_COUNTS_PER_REV   8192.0f
 
 /* 电机极对数，必须和 foc.h 里的 FOC_POLE_PAIRS 一致 */
-#define ENC_POLE_PAIRS       21
+#define ENC_POLE_PAIRS       10
 
 /* 编码器计数方向。
  * 正常情况下电机磁场正转时读数应该增大；
@@ -49,10 +49,10 @@
 
 /* 速度计算窗口：每 100 拍（20kHz 下 = 5ms）算一次速度。
  * 用窗口而不是逐拍差分，是因为 16384 分辨率下逐拍差分量化噪声太大 */
-#define ENC_SPEED_WINDOW     100
+#define ENC_SPEED_WINDOW     40
 
 /* 速度低通系数：0.2 表示新值占 20%，越小越平滑但越滞后 */
-#define ENC_SPEED_LPF        0.2f
+#define ENC_SPEED_LPF        0.5f
 
 #define ENC_TWO_PI           6.2831853f
 #define ENC_PI               3.14159265f
@@ -63,7 +63,7 @@
  * 自洽校验：6.1727×21 mod 2π = 3.964，+5.461 = 9.425 mod 2π = π，
  * 正好等于预定位矢量方向（FOC_ALIGN_THETA π/2 + 90°）✅
  * 配 FOC_TORQUE_SIGN = +1 */
-#define ENC_ELEC_OFFSET      5.4610f
+#define ENC_ELEC_OFFSET      0.6627f
 
 /* ============================================================
  *  二、观测量（给 VOFA+ 看）
@@ -71,9 +71,9 @@
 
 typedef struct {
     uint16_t raw;            /* SPI 读到的原始 16 位         */
-    float    mech_rad;       /* 机械角，0 ~ 2π               */
-    float    elec_rad;       /* 电角度，0 ~ 2π               */
-    float    speed_radps;    /* 机械角速度，rad/s            */
+    float    angle_mech;       /* 机械角，0 ~ 2π               */
+    float    angle;       /* 电角度，0 ~ 2π               */
+    float    speed;    /* 机械角速度，rad/s            */
     float    zero_offset;    /* 机械零位偏移                 */
     uint32_t error_count;    /* 读数异常计数（全 0 或全 1）  */
 } encoder_debug_t;
