@@ -220,10 +220,18 @@ void foc_close_position(float target_angle)
     error_pos = wrap_pi(target_angle - angle_mech);
     g_error_pos = error_pos;
 
-    g_integral_pos += FOC_POS_KI * error_pos * FOC_TS;
+    /* 积分只在"误差确实存在"时累积，且自己有独立的、更小的限幅。
+       为什么要单独限幅：这台电机静摩擦大，小误差推不动，
+       积分会一直涨到满力（1.3V），一旦涨满就变成开关控制 → 疯狂震荡。
+       把积分限幅到满力的 1/3，它就只能提供"偏置"，主力仍由 P 项出。 */
+    if (error_pos >  FOC_POS_I_DEADZONE ||
+        error_pos < -FOC_POS_I_DEADZONE)
+    {
+        g_integral_pos += FOC_POS_KI * error_pos * FOC_TS;
+    }
 
-    if (g_integral_pos >  FOC_UQ_LIMIT) { g_integral_pos =  FOC_UQ_LIMIT; }
-    if (g_integral_pos < -FOC_UQ_LIMIT) { g_integral_pos = -FOC_UQ_LIMIT; }
+    if (g_integral_pos >  FOC_POS_I_LIMIT) { g_integral_pos =  FOC_POS_I_LIMIT; }
+    if (g_integral_pos < -FOC_POS_I_LIMIT) { g_integral_pos = -FOC_POS_I_LIMIT; }
 
     voltage_q = FOC_POS_KP * error_pos
        + g_integral_pos
