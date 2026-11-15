@@ -1,18 +1,23 @@
 #include "foc.h"
 #include "encoder.h"
+#include "ADCcurrent.h"
 #include <math.h>
 
 extern TIM_HandleTypeDef htim1;
 
-/* ---------- 内部变量（只在本文件用） ---------- */
-static float g_angle = 0.0f;    /* 当前开环累加的电角度，弧度 */
-static float g_speed_e      = 0.0f;    /* 当前电角速度，弧度/秒 */
-static float g_angle_mech = 0.0f;  /* 编码器实测机械角，给调试看 */
-static float g_error_pos     = 0.0f;  /* 最近一次位置误差，给调试看 */
-static float g_integral_pos  = 0.0f;  /* 位置环积分项，单位伏 */
-static float g_offset_trim = 0.0f; /* 电角度微调，offset 扫描标定用 */
-static float g_integral_speed   = 0.0f; /* 速度环积分项，单位伏 */
-static uint32_t g_stall   = 0;    /* 速度环"卡住"计数 */
+static float g_angle = 0.0f;
+static float g_speed_e      = 0.0f;
+static float g_angle_mech = 0.0f;
+static float g_error_pos     = 0.0f;
+static float g_integral_pos  = 0.0f;
+static float g_offset_trim = 0.0f;
+static float g_integral_speed   = 0.0f;
+static uint32_t g_stall   = 0;
+
+static float g_integral_id      = 0.0f;
+static float g_integral_iq      = 0.0f;
+static float g_current_d_filter = 0.0f;
+static float g_current_q_filter = 0.0f;
 
 void foc_set_offset_trim(float trim)
 {
@@ -33,6 +38,11 @@ void foc_init(void)
     g_speed_e             = 0.0f;
     g_integral_pos   = 0.0f;
     g_integral_speed = 0.0f;
+
+    /* 保留旧版电压环调试状态，当前电流环模式不读取它们。 */
+    (void)g_speed_e;
+    (void)g_angle_mech;
+    (void)g_error_pos;
 }
 
 float foc_voltage_vf(float speed_e)
@@ -113,16 +123,18 @@ static float wrap_pi(float angle)
     return angle;
 }
 
-static void foc_output(float angle, float voltage_q)
+static void foc_output_dq(float angle, float voltage_d, float voltage_q)
 {
     float u_alpha, u_beta;
     float u_a, u_b, u_c;
     float u_max, u_min, u_com;
     float duty_a, duty_b, duty_c;
     uint32_t ccr_a, ccr_b, ccr_c;
+    float cos_a = cosf(angle);
+    float sin_a = sinf(angle);
 
-    u_alpha = -voltage_q * sinf(angle);
-    u_beta  =  voltage_q * cosf(angle);
+    u_alpha = voltage_d * cos_a - voltage_q * sin_a;
+    u_beta  = voltage_d * sin_a + voltage_q * cos_a;
 
     u_a =  u_alpha;
     u_b = -0.5f * u_alpha + SQRT3_2 * u_beta;
@@ -168,6 +180,11 @@ static void foc_output(float angle, float voltage_q)
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, ccr_c);
 }
 
+static void foc_output(float angle, float voltage_q)
+{
+    foc_output_dq(angle, 0.0f, voltage_q);
+}
+
 void foc_open(float target_speed)
 {
     float speed_e;
@@ -183,9 +200,6 @@ void foc_open(float target_speed)
 
     voltage_q = foc_voltage_vf(speed_e);
 
-    /* 安全限幅：V/f 曲线在高速时会给出几伏甚至接近母线电压，
-       但那只是 SVPWM 的物理极限，不是芯片散热能承受的。
-       必须和闭环一样受 FOC_UQ_LIMIT 约束，否则改大 TARGET_SPEED 会烧板子。 */
     if (voltage_q >  FOC_UQ_LIMIT) { voltage_q =  FOC_UQ_LIMIT; }
     if (voltage_q < -FOC_UQ_LIMIT) { voltage_q = -FOC_UQ_LIMIT; }
 
@@ -213,17 +227,13 @@ void foc_close_position(float target_angle)
     angle_mech = g_encoder_dbg.angle_mech;
     g_angle_mech = angle_mech;
 
-    angle = wrap_two_pi(angle_mech * (float)FOC_POLE_PAIRS
+    angle = wrap_two_pi(angle_mech * (float)FOC_POLE_PAIRS * ENC_ELEC_DIR
                          + ENC_ELEC_OFFSET
                          + g_offset_trim);
 
     error_pos = wrap_pi(target_angle - angle_mech);
     g_error_pos = error_pos;
 
-    /* 积分只在"误差确实存在"时累积，且自己有独立的、更小的限幅。
-       为什么要单独限幅：这台电机静摩擦大，小误差推不动，
-       积分会一直涨到满力（1.3V），一旦涨满就变成开关控制 → 疯狂震荡。
-       把积分限幅到满力的 1/3，它就只能提供"偏置"，主力仍由 P 项出。 */
     if (error_pos >  FOC_POS_I_DEADZONE ||
         error_pos < -FOC_POS_I_DEADZONE)
     {
@@ -265,7 +275,7 @@ void foc_close_speed(float target_speed)
     angle_mech    = g_encoder_dbg.angle_mech;
     speed = g_encoder_dbg.speed;
 
-    angle = wrap_two_pi(angle_mech * (float)FOC_POLE_PAIRS
+    angle = wrap_two_pi(angle_mech * (float)FOC_POLE_PAIRS * ENC_ELEC_DIR
                          + ENC_ELEC_OFFSET
                          + g_offset_trim);
 
@@ -277,16 +287,11 @@ void foc_close_speed(float target_speed)
 
     feed_forward = direction * (FOC_VF_SLOPE * speed_e + FOC_VOLT_OFFSET);
 
-    /* 积分项单独限幅：和位置环同一个道理，
-       积分涨到满力就变成开关控制 → 震荡。
-       前馈已经给了大部分工作电压，积分只需要修补偏差。 */
     g_integral_speed += FOC_SPEED_KI * error_speed * FOC_TS;
 
     if (g_integral_speed >  FOC_SPEED_I_LIMIT) { g_integral_speed =  FOC_SPEED_I_LIMIT; }
     if (g_integral_speed < -FOC_SPEED_I_LIMIT) { g_integral_speed = -FOC_SPEED_I_LIMIT; }
 
-    /* 加速度前馈：用"给定速度的变化率"提前出力。
-       给 0 时这段等于没有，不影响原有行为。 */
     {
         static float s_last_target_speed = 0.0f;
         float accel = (target_speed - s_last_target_speed) / FOC_TS;
@@ -334,4 +339,79 @@ void foc_close_speed(float target_speed)
     g_foc_dbg.error_pos  = error_speed;
 
     foc_output(angle, voltage_q);
+}
+
+void foc_close_current(float target_iq, float target_id)
+{
+    float angle_mech;
+    float angle;
+    float cos_a, sin_a;
+    float current_a, current_b, current_c;
+    float current_alpha, current_beta;
+    float current_d, current_q;
+    float target_iq_control;
+    float error_d, error_q;
+    float voltage_d, voltage_q;
+    float voltage_mag;
+
+    encoder_update();
+    angle_mech = g_encoder_dbg.angle_mech;
+
+    angle = wrap_two_pi(angle_mech * (float)FOC_POLE_PAIRS * ENC_ELEC_DIR
+                         + ENC_ELEC_OFFSET
+                         + g_offset_trim);
+
+    current_read(&current_a, &current_b, &current_c);
+
+    current_alpha = current_a;
+    current_beta  = (current_a + 2.0f * current_b) * 0.57735f;
+
+    cos_a = cosf(angle);
+    sin_a = sinf(angle);
+
+    current_d =  current_alpha * cos_a + current_beta * sin_a;
+    current_q = -current_alpha * sin_a + current_beta * cos_a;
+
+    g_current_d_filter += FOC_CURRENT_LPF * (current_d - g_current_d_filter);
+    g_current_q_filter += FOC_CURRENT_LPF * (current_q - g_current_q_filter);
+
+    current_d = g_current_d_filter;
+    current_q = g_current_q_filter;
+
+    if (target_iq >  FOC_IQ_LIMIT) { target_iq =  FOC_IQ_LIMIT; }
+    if (target_iq < -FOC_IQ_LIMIT) { target_iq = -FOC_IQ_LIMIT; }
+
+    target_iq_control = FOC_TORQUE_SIGN * target_iq;
+
+    error_d = target_id - current_d;
+    error_q = target_iq_control - current_q;
+
+    g_integral_id += FOC_CURRENT_KI * error_d * FOC_TS;
+    g_integral_iq += FOC_CURRENT_KI * error_q * FOC_TS;
+
+    if (g_integral_id >  FOC_CURRENT_I_LIMIT) { g_integral_id =  FOC_CURRENT_I_LIMIT; }
+    if (g_integral_id < -FOC_CURRENT_I_LIMIT) { g_integral_id = -FOC_CURRENT_I_LIMIT; }
+    if (g_integral_iq >  FOC_CURRENT_I_LIMIT) { g_integral_iq =  FOC_CURRENT_I_LIMIT; }
+    if (g_integral_iq < -FOC_CURRENT_I_LIMIT) { g_integral_iq = -FOC_CURRENT_I_LIMIT; }
+
+    voltage_d = FOC_CURRENT_KP * error_d + g_integral_id;
+    voltage_q = FOC_CURRENT_KP * error_q + g_integral_iq;
+
+    voltage_mag = sqrtf(voltage_d * voltage_d + voltage_q * voltage_q);
+
+    if (voltage_mag > FOC_UQ_LIMIT)
+    {
+        voltage_d = voltage_d * FOC_UQ_LIMIT / voltage_mag;
+        voltage_q = voltage_q * FOC_UQ_LIMIT / voltage_mag;
+    }
+
+    foc_output_dq(angle, voltage_d, voltage_q);
+
+    g_foc_dbg.target        = target_iq;
+    g_foc_dbg.angle_mech    = angle_mech;
+    g_foc_dbg.error_pos     = error_q;
+    g_foc_dbg.speed_e       = g_encoder_dbg.speed * (float)FOC_POLE_PAIRS;
+    g_foc_dbg.current_d     = current_d;
+    g_foc_dbg.current_q     = current_q;
+    g_foc_dbg.current_q_ref = target_iq_control;
 }

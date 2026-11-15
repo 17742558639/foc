@@ -15,6 +15,7 @@
 
 #include "encoder.h"
 #include "foc.h"
+#include "encoder_jump_filter.h"
 #include <math.h>
 
 /* 这个工程是"扁平结构"，SPI 的句柄直接在 main.c 里定义（没有 spi.c/spi.h），
@@ -38,6 +39,10 @@ static uint16_t s_sample_count = 0;
 
 /* 第一次调用时还没有"上一次角度"，不参与差分 */
 static uint8_t s_first_run = 1;
+
+/* 最近一次有效SPI帧，用于拒绝短暂异常数据。 */
+static uint16_t s_last_valid_raw = 0U;
+static uint8_t s_has_valid_raw = 0U;
 
 /* ============================================================
  *  二、小工具函数
@@ -68,12 +73,13 @@ uint16_t encoder_read_raw(void)
     uint8_t  tx_buffer[2] = {0xFF, 0xFF};   /* 发什么无所谓，从机不看 MOSI */
     uint8_t  rx_buffer[2] = {0x00, 0x00};
     uint16_t raw_value;
+    HAL_StatusTypeDef spi_status;
 
     /* 片选拉低：告诉编码器"开始" */
     HAL_GPIO_WritePin(ENC_CS_PORT, ENC_CS_PIN, GPIO_PIN_RESET);
 
     /* 打 16 个时钟，从机把 16 位数据吐回来 */
-    HAL_SPI_TransmitReceive(&hspi1, tx_buffer, rx_buffer, 2, 10);
+    spi_status = HAL_SPI_TransmitReceive(&hspi1, tx_buffer, rx_buffer, 2, 10);
 
     /* 片选拉高：结束这次传输 */
     HAL_GPIO_WritePin(ENC_CS_PORT, ENC_CS_PIN, GPIO_PIN_SET);
@@ -81,9 +87,19 @@ uint16_t encoder_read_raw(void)
     raw_value = ((uint16_t)rx_buffer[0] << 8) | (uint16_t)rx_buffer[1];
 
     /* 读写异常判断：全 0 或全 1 说明总线没通 */
-    if (raw_value == 0x0000 || raw_value == 0xFFFF) {
+    if (spi_status != HAL_OK || raw_value == 0x0000 || raw_value == 0xFFFF) {
         g_encoder_dbg.error_count++;
+
+        if (s_has_valid_raw)
+        {
+            return s_last_valid_raw;
+        }
+
+        return 0U;
     }
+
+    s_last_valid_raw = raw_value;
+    s_has_valid_raw = 1U;
 
     return raw_value;
 }
@@ -149,7 +165,28 @@ void encoder_update(void)
 
     /* 本拍相对上一拍转过的角度（处理过零） */
     delta_angle = wrap_delta(angle_mech - s_last_angle_mech);
+
+    /*
+     * === 旧版：所有非0x0000/0xFFFF帧都参与测速（已弃用）===
+     * 问题：SPI偶发错误帧会产生43度至180度的单拍突跳，下一拍恢复时
+     *       又产生相反突跳，造成速度正负翻转。
+     * === 新版：只拒绝超过20度的单拍不可能突跳 ===
+     * 2度机械扰动、锁定过程中的7至11度正常运动均不会被过滤。
+     */
+#if 0
     s_last_angle_mech = angle_mech;
+#else
+    if (!encoder_delta_is_plausible(delta_angle))
+    {
+        g_encoder_dbg.jump_reject_count++;
+        angle_mech = s_last_angle_mech;
+        delta_angle = 0.0f;
+    }
+    else
+    {
+        s_last_angle_mech = angle_mech;
+    }
+#endif
 
     /* 累积到窗口里 */
     s_delta_accum += delta_angle;
@@ -192,11 +229,14 @@ void encoder_init(void)
     g_encoder_dbg.speed = 0.0f;
     g_encoder_dbg.zero_offset = 0.0f;
     g_encoder_dbg.error_count = 0;
+    g_encoder_dbg.jump_reject_count = 0;
 
     s_last_angle_mech = 0.0f;
     s_delta_accum   = 0.0f;
     s_sample_count  = 0;
     s_first_run     = 1;
+    s_last_valid_raw = 0U;
+    s_has_valid_raw = 0U;
 }
 
 void encoder_set_zero(void)

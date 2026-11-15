@@ -3,62 +3,55 @@
 
 #include "main.h"
 
-/* ==================== 基础参数 ==================== */
-#define FOC_TS              0.00005f    /* 控制周期，秒（20kHz） */
-#define PWM_ARR             4199.0f     /* 定时器 ARR */
-#define VDC_BUS             12.0f       /* 母线电压，伏 */
+#define FOC_TS              0.00005f
+#define PWM_ARR             4199.0f
+#define VDC_BUS             12.0f
 
-/* ==================== 电机参数 ==================== */
-#define FOC_POLE_PAIRS      10          /* 极对数，实测确认 */
-#define FOC_TORQUE_SIGN     1.0f        /* 转矩方向，与 offset 配套 */
+#define FOC_POLE_PAIRS      10
+#define FOC_TORQUE_SIGN     (-1.0f)
 
-/* ==================== 电压限制 ==================== */
-#define FOC_VOLTAGE_MAX     6.92f       /* 相电压上限，伏（Vdc/√3） */
-#define FOC_UQ_LIMIT        1.30f       /* 实际用的电压限幅，伏 */
+#define FOC_VOLTAGE_MAX     6.92f
 
-/* ==================== 开环 V/f ==================== */
-#define FOC_VF_SLOPE        0.0008f     /* 斜率，伏/(弧度/秒) */
-#define FOC_VOLT_OFFSET     0.050f       /* 低速补偿电压，伏 */
+#define FOC_UQ_LIMIT        0.60f
 
-/* ==================== 预定位标定 ==================== */
-#define FOC_ALIGN_VOLTAGE   0.50f       /* 预定位电压，伏 */
-#define FOC_ALIGN_THETA     1.5708f     /* 预定位矢量电角度，弧度 */
+#define FOC_VF_SLOPE        0.0011f
 
-/* ==================== 位置环 PID ==================== */
-#define FOC_POS_KP          5.0f        /* 比例，伏/弧度 */
-#define FOC_POS_KI          0.0f        /* 积分，伏/(弧度·秒) */
-#define FOC_POS_KD          0.0f       /* 微分，伏/(弧度/秒) */
+#define FOC_VOLT_OFFSET     0.200f
 
-/* 积分项自己的限幅（伏），必须远小于 FOC_UQ_LIMIT。
- * 原因：这台电机静摩擦大，误差小时 P 推不动，积分会一路涨到满力，
- * 涨满后系统就变成开关控制 → 疯狂震荡。限到满力的 1/3 即可。 */
+#define FOC_ALIGN_VOLTAGE   0.35f
+#define FOC_ALIGN_THETA     1.5708f
+
+#define FOC_POS_KP          2.0f
+#define FOC_POS_KI          0.0f
+#define FOC_POS_KD          0.0f
+
 #define FOC_POS_I_LIMIT     0.40f
 
-/* 积分死区（弧度）。误差小于这个值就不积分，防止在目标附近反复磨积分。
- * 0.01 rad ≈ 0.57°。 */
 #define FOC_POS_I_DEADZONE  0.010f
 
-/* ==================== 速度环 PI ==================== */
-#define FOC_SPEED_KP        0.15f       /* 比例，伏/(弧度/秒) */
-#define FOC_SPEED_KI        0.0f        /* 积分，伏/(弧度/秒·秒) */
+#define FOC_SPEED_KP        0.06f
+#define FOC_SPEED_KI        0.0f
 
-/* 速度环积分项自己的限幅（伏）。前馈已经给了大部分工作电压，
-   积分只负责修补偏差，所以限得比 FOC_UQ_LIMIT 小得多。 */
 #define FOC_SPEED_I_LIMIT   0.60f
-
-/* 加速度前馈系数，单位 伏/(弧度/秒²)。
- * 作用：速度给定在变化时，按"加速度"提前给一份电压，让跟踪更准。
- * 物理值 = R*J/Kt，J 约 2e-5 kg·m² 时约 0.001，量级很小。
- * 给 0 = 关闭。 */
 
 #define FOC_SPEED_ACC_FFF   0.000f
 
-/* ==================== 起动冲击（破静摩擦） ==================== */
-#define FOC_START_BOOST     0.0f       /* 冲击电压，伏 */
-#define FOC_STALL_TICKS     4000        /* 判卡住：4000 拍 = 0.2 秒 */
-#define FOC_BOOST_TICKS     8000        /* 冲击节奏：8000 拍 = 0.4 秒 */
+#define FOC_START_BOOST     0.0f
+#define FOC_STALL_TICKS     4000
+#define FOC_BOOST_TICKS     8000
 
-/* ==================== 对外函数 ==================== */
+#define FOC_CURRENT_KP      0.50f
+#define FOC_CURRENT_KI      12.20f
+
+/* 旧版：#define FOC_CURRENT_I_LIMIT 0.30f，高于0.30A的目标电流难以继续建立。 */
+#define FOC_CURRENT_I_LIMIT 0.60f
+
+#define FOC_IQ_LIMIT        3.20f
+
+#define FOC_ID_TARGET       0.0f
+
+#define FOC_CURRENT_LPF     0.50f
+
 void  foc_init(void);
 void  foc_align(void);
 void  foc_stop(void);
@@ -66,22 +59,25 @@ void  foc_static(float target_angle, float voltage_q);
 void  foc_set_offset_trim(float trim);
 float foc_voltage_vf(float speed_e);
 
-void  foc_open(float target_speed);                       /* 开环 */
-void  foc_close_position(float target_angle);        /* 位置闭环 */
-void  foc_close_speed(float target_speed);        /* 速度闭环 */
+void  foc_open(float target_speed);
+void  foc_close_position(float target_angle);
+void  foc_close_speed(float target_speed);
+void  foc_close_current(float target_iq, float target_id);
 
-/* ==================== 调试观测量 ==================== */
 typedef struct
 {
-    float target;        /* 目标转速 或 目标角度 */
-    float speed_e;       /* 电角速度，弧度/秒 */
-    float angle;         /* 电角度，弧度 */
-    float voltage_q;     /* q 轴电压，伏 */
-    float duty_a;        /* A 相占空比 0~1 */
-    float duty_b;        /* B 相占空比 0~1 */
-    float duty_c;        /* C 相占空比 0~1 */
-    float angle_mech;    /* 机械角，弧度 */
-    float error_pos;     /* 位置误差 或 速度误差 */
+    float target;
+    float speed_e;
+    float angle;
+    float voltage_q;
+    float duty_a;
+    float duty_b;
+    float duty_c;
+    float angle_mech;
+    float error_pos;
+    float current_d;
+    float current_q;
+    float current_q_ref;
 } foc_debug_t;
 
 extern volatile foc_debug_t g_foc_dbg;
